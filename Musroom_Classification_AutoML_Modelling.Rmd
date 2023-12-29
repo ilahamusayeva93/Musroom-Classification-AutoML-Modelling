@@ -1,0 +1,164 @@
+---
+title: "R Notebook_Mushroom_Classification_AutoML_Modelling"
+output: html_notebook
+---
+## Required Libraries
+
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(rstudioapi)
+library(skimr)
+library(car)
+library(h2o)
+library(rlang)
+library(glue)
+library(highcharter)
+library(lime) 
+```
+## Data Loading
+```{r}
+raw<-fread("mushrooms.csv")
+raw%>%skim()
+```
+
+## Data Exploration
+```{r}
+names(raw) <- names(raw) %>% 
+  str_replace_all(" ","_") %>% 
+  str_replace_all("-","_") %>% 
+  str_replace_all("/","_")
+head(raw)
+View(raw)
+colnames(raw)
+```
+## Data preprocessing
+
+```{r}
+total_na_count <- sum(is.na(raw))
+total_na_count
+
+
+categorical_cols <- c("cap_shape", "cap_surface", "cap_color", "bruises%3F", "odor", "gill_attachment", "gill_spacing", "gill_size", "gill_color", "stalk_shape", "stalk_root", "stalk_surface_above_ring", "stalk_surface_below_ring", "stalk_color_above_ring", "stalk_color_below_ring", "veil_type", "veil_color", "ring_number", "ring_type", "spore_print_color", "population", "habitat")
+
+for (col in categorical_cols) {
+  raw[[col]] <- as.factor(raw[[col]])
+}
+
+raw$class <- as.factor(raw$class)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+## Modeling
+```{r}
+h2o.init()
+
+
+
+h2o_data <- raw %>% as.h2o()
+
+
+# Splitting the data ----
+h2o_data <- h2o_data %>% h2o.splitFrame(ratios = 0.8, seed = 123)
+train <- h2o_data[[1]]
+test <- h2o_data[[2]]
+
+target <- 'class'
+features <- raw %>% select(-class) %>% names()
+
+
+# Fitting h2o model ----
+model <- h2o.automl(
+  x = features, y = target,
+  training_frame = train,
+  validation_frame = test,
+  leaderboard_frame = test,
+  stopping_metric = "AUC",
+  nfolds = 5, seed = 123,
+  max_runtime_secs = 600)
+
+model@leaderboard %>% as.data.frame()
+model@leader 
+
+
+# Predicting the Test set results ----
+pred <- model@leader %>% h2o.predict(test) %>% as.data.frame()
+
+# Threshold / Cutoff ----  
+model@leader %>% 
+  h2o.performance(test) %>% 
+  h2o.find_threshold_by_max_metric('f1') -> treshold
+
+```
+## Model Evaulation
+```{r}
+
+
+model@leader %>% 
+  h2o.performance(test) %>% 
+  h2o.metric() %>% 
+  select(threshold,precision,recall,tpr,fpr) %>% 
+  add_column(tpr_r=runif(nrow(.),min=0.001,max=1)) %>% 
+  mutate(fpr_r=tpr_r) %>% 
+  arrange(tpr_r,fpr_r) -> deep_metrics
+
+model@leader %>% 
+  h2o.performance(test) %>% 
+  h2o.auc() %>% round(2) -> auc
+
+highchart() %>% 
+  hc_add_series(deep_metrics, "scatter", hcaes(y=tpr,x=fpr), color='green', name='TPR') %>%
+  hc_add_series(deep_metrics, "line", hcaes(y=tpr_r,x=fpr_r), color='red', name='Random Guess') %>% 
+  hc_add_annotation(
+    labels = list(
+      point = list(xAxis=0,yAxis=0,x=0.3,y=0.6),
+      text = glue('AUC = {enexpr(auc)}'))
+  ) %>%
+  hc_title(text = "ROC Curve") %>% 
+  hc_subtitle(text = "Model is performing much better than random guessing") 
+
+```
+## Check overfitting
+```{r}
+model@leader %>%
+  h2o.auc(train = T,
+          valid = T,
+          xval = T) %>%
+  as_tibble() %>%
+  round(2) %>%
+  mutate(data = c('train','test','cross_val')) %>%
+  mutate(gini = 2*value-1) %>%
+  select(data,auc=value,gini)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
